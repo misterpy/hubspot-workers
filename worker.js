@@ -278,7 +278,7 @@ const processMeetings = async (domain, hubId, q) => {
     const lastModifiedDate = offsetObject.lastModifiedDate || lastPulledDate;
     const lastModifiedDateFilter = generateLastModifiedDateFilter(lastModifiedDate, now);
     const searchObject = {
-      // filterGroups: [lastModifiedDateFilter],
+      filterGroups: [lastModifiedDateFilter],
       sorts: [{ propertyName: 'hs_lastmodifieddate', direction: 'ASCENDING' }],
       properties: [
         'hs_meeting_title',
@@ -318,7 +318,7 @@ const processMeetings = async (domain, hubId, q) => {
         includeInAnalytics: 0,
         meetingProperties: {
           meeting_id: meeting.id,
-          meeting_timestamp: meeting.properties.domain,
+          meeting_timestamp: meeting.properties.hs_timestamp,
           meeting_title: meeting.properties.hs_meeting_title,
           meeting_outcome: meeting.properties.hs_meeting_outcome,
         }
@@ -335,11 +335,9 @@ const processMeetings = async (domain, hubId, q) => {
 
     for (const action of actions) {
       const contacts = await getMeetingContacts(action.meetingProperties.meeting_id);
-      action.meetingProperties.contacts = contacts.map(contact => contact.email);
+      action.meetingProperties.meeting_contacts = contacts.map(contact => contact.email);
+      q.push(action);
     }
-
-    // TODO
-    // q.push(...actions);
 
     if (!offsetObject?.after) {
       hasMore = false;
@@ -396,8 +394,6 @@ const getMeetingContacts = async (meetingId) => {
       contacts.push(contactDetails);
     }
   }
-
-  console.log('fetch meeting contacts');
 
   return contacts;
 }
@@ -466,19 +462,19 @@ const pullDataFromHubspot = async () => {
     const actions = [];
     const q = createQueue(domain, actions);
 
-    // try {
-    //   await processContacts(domain, account.hubId, q);
-    //   console.log('process contacts');
-    // } catch (err) {
-    //   console.log(err, { apiKey: domain.apiKey, metadata: { operation: 'processContacts', hubId: account.hubId } });
-    // }
+    try {
+      await processContacts(domain, account.hubId, q);
+      console.log('process contacts');
+    } catch (err) {
+      console.log(err, { apiKey: domain.apiKey, metadata: { operation: 'processContacts', hubId: account.hubId } });
+    }
 
-    // try {
-    //   await processCompanies(domain, account.hubId, q);
-    //   console.log('process companies');
-    // } catch (err) {
-    //   console.log(err, { apiKey: domain.apiKey, metadata: { operation: 'processCompanies', hubId: account.hubId } });
-    // }
+    try {
+      await processCompanies(domain, account.hubId, q);
+      console.log('process companies');
+    } catch (err) {
+      console.log(err, { apiKey: domain.apiKey, metadata: { operation: 'processCompanies', hubId: account.hubId } });
+    }
 
     try {
       await processMeetings(domain, account.hubId, q);
@@ -487,14 +483,14 @@ const pullDataFromHubspot = async () => {
       console.log(err, { apiKey: domain.apiKey, metadata: { operation: 'processMeetings', hubId: account.hubId } });
     }
 
-    // try {
-    //   await drainQueue(domain, actions, q);
-    //   console.log('drain queue');
-    // } catch (err) {
-    //   console.log(err, { apiKey: domain.apiKey, metadata: { operation: 'drainQueue', hubId: account.hubId } });
-    // }
+    try {
+      await drainQueue(domain, actions, q);
+      console.log('drain queue');
+    } catch (err) {
+      console.log(err, { apiKey: domain.apiKey, metadata: { operation: 'drainQueue', hubId: account.hubId } });
+    }
 
-    // await saveDomain(domain);
+    await saveDomain(domain);
 
     console.log('finish processing account');
   }
