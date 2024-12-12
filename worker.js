@@ -262,6 +262,168 @@ const processContacts = async (domain, hubId, q) => {
   return true;
 };
 
+/**
+ * Get recently modified meetings as 100 meetings per page
+ */
+const processMeetings = async (domain, hubId, q) => {
+  const account = domain.integrations.hubspot.accounts.find(account => account.hubId === hubId);
+  const lastPulledDate = new Date(account.lastPulledDates.meetings);
+  const now = new Date();
+
+  let hasMore = true;
+  const offsetObject = {};
+  const limit = 100;
+
+  while (hasMore) {
+    const lastModifiedDate = offsetObject.lastModifiedDate || lastPulledDate;
+    const lastModifiedDateFilter = generateLastModifiedDateFilter(lastModifiedDate, now);
+    const searchObject = {
+      // filterGroups: [lastModifiedDateFilter],
+      sorts: [{ propertyName: 'hs_lastmodifieddate', direction: 'ASCENDING' }],
+      properties: [
+        'hs_meeting_title',
+        'hs_timestamp',
+        'hs_meeting_outcome',
+        'associations',
+      ],
+      limit,
+      after: offsetObject.after
+    };
+
+    let searchResult = {};
+
+    let tryCount = 0;
+    while (tryCount <= 4) {
+      try {
+        searchResult = await hubspotClient.crm.objects.meetings.searchApi.doSearch(searchObject);
+        break;
+      } catch (err) {
+        tryCount++;
+
+        if (new Date() > expirationDate) await refreshAccessToken(domain, hubId);
+
+        await new Promise((resolve, reject) => setTimeout(resolve, 5000 * Math.pow(2, tryCount)));
+      }
+    }
+
+    if (!searchResult) throw new Error('Failed to fetch meetings for the 4th time. Aborting.');
+
+    const data = searchResult?.results || [];
+    offsetObject.after = parseInt(searchResult?.paging?.next?.after);
+
+    console.log('fetch meeting batch');
+
+    const actions = data.filter(meeting => meeting.properties).map(meeting => {
+      const actionTemplate = {
+        includeInAnalytics: 0,
+        meetingProperties: {
+          meeting_id: meeting.id,
+          meeting_timestamp: meeting.properties.domain,
+          meeting_title: meeting.properties.hs_meeting_title,
+          meeting_outcome: meeting.properties.hs_meeting_outcome,
+        }
+      };
+
+      const isCreated = !lastPulledDate || (new Date(meeting.createdAt) > lastPulledDate);
+
+      return {
+        actionName: isCreated ? 'Meeting Created' : 'Meeting Updated',
+        actionDate: new Date(isCreated ? meeting.createdAt : meeting.updatedAt) - 2000,
+        ...actionTemplate
+      };
+    });
+
+    for (const action of actions) {
+      const contacts = await getMeetingContacts(action.meetingProperties.meeting_id);
+      action.meetingProperties.contacts = contacts.map(contact => contact.email);
+    }
+
+    // TODO
+    // q.push(...actions);
+
+    if (!offsetObject?.after) {
+      hasMore = false;
+      break;
+    } else if (offsetObject?.after >= 9900) {
+      offsetObject.after = 0;
+      offsetObject.lastModifiedDate = new Date(data[data.length - 1].updatedAt).valueOf();
+    }
+  }
+
+  account.lastPulledDates.companies = now;
+  await saveDomain(domain);
+
+  return true;
+};
+
+const getMeetingContacts = async (meetingId) => {
+  let associationSearchResults = {};
+
+  const properties = undefined;
+  const propertiesWithHistory = undefined;
+  const associations = ['CONTACTS'];
+  const archived = false;
+  const idProperty = undefined;
+
+  let tryCount = 0;
+  while (tryCount <= 4) {
+    try {
+      associationSearchResults = await hubspotClient.crm.objects.meetings.basicApi.getById(meetingId, properties, propertiesWithHistory, associations, archived, idProperty);
+      break;
+    } catch (err) {
+      tryCount++;
+
+      if (new Date() > expirationDate) await refreshAccessToken(domain, hubId);
+
+      await new Promise((resolve, reject) => setTimeout(resolve, 5000 * Math.pow(2, tryCount)));
+    }
+  }
+
+  if (!associationSearchResults) throw new Error('Failed to fetch meeting contacts for the 4th time. Aborting.');
+
+  const contactResults = associationSearchResults?.associations?.contacts?.results || [];
+
+  if (!contactResults.length) return [];
+  
+  const contactIds = contactResults.map(contact => contact.id);
+
+  let contacts = [];
+
+  for (const contactId of contactIds) {
+    const contactDetails = await getContactDetails(contactId);
+
+    if (contactDetails) {
+      contacts.push(contactDetails);
+    }
+  }
+
+  console.log('fetch meeting contacts');
+
+  return contacts;
+}
+
+const getContactDetails = async (contactId) => {
+  let contactDetailResults = {};
+
+  tryCount = 0;
+  while (tryCount <= 4) {
+    try {
+      contactDetailResults = await hubspotClient.crm.contacts.basicApi.getById(contactId, ['email']);
+      break;
+    } catch (err) {
+      tryCount++;
+
+      if (new Date() > expirationDate) await refreshAccessToken(domain, hubId);
+
+      await new Promise((resolve, reject) => setTimeout(resolve, 5000 * Math.pow(2, tryCount)));
+    }
+  }
+
+  if (!contactDetailResults || !contactDetailResults.properties) throw new Error('Failed to fetch contact details for the 4th time. Aborting.');
+
+  return { email: contactDetailResults.properties.email };
+};
+
 const createQueue = (domain, actions) => queue(async (action, callback) => {
   actions.push(action);
 
@@ -304,28 +466,35 @@ const pullDataFromHubspot = async () => {
     const actions = [];
     const q = createQueue(domain, actions);
 
-    try {
-      await processContacts(domain, account.hubId, q);
-      console.log('process contacts');
-    } catch (err) {
-      console.log(err, { apiKey: domain.apiKey, metadata: { operation: 'processContacts', hubId: account.hubId } });
-    }
+    // try {
+    //   await processContacts(domain, account.hubId, q);
+    //   console.log('process contacts');
+    // } catch (err) {
+    //   console.log(err, { apiKey: domain.apiKey, metadata: { operation: 'processContacts', hubId: account.hubId } });
+    // }
+
+    // try {
+    //   await processCompanies(domain, account.hubId, q);
+    //   console.log('process companies');
+    // } catch (err) {
+    //   console.log(err, { apiKey: domain.apiKey, metadata: { operation: 'processCompanies', hubId: account.hubId } });
+    // }
 
     try {
-      await processCompanies(domain, account.hubId, q);
-      console.log('process companies');
+      await processMeetings(domain, account.hubId, q);
+      console.log('process meetings');
     } catch (err) {
-      console.log(err, { apiKey: domain.apiKey, metadata: { operation: 'processCompanies', hubId: account.hubId } });
+      console.log(err, { apiKey: domain.apiKey, metadata: { operation: 'processMeetings', hubId: account.hubId } });
     }
 
-    try {
-      await drainQueue(domain, actions, q);
-      console.log('drain queue');
-    } catch (err) {
-      console.log(err, { apiKey: domain.apiKey, metadata: { operation: 'drainQueue', hubId: account.hubId } });
-    }
+    // try {
+    //   await drainQueue(domain, actions, q);
+    //   console.log('drain queue');
+    // } catch (err) {
+    //   console.log(err, { apiKey: domain.apiKey, metadata: { operation: 'drainQueue', hubId: account.hubId } });
+    // }
 
-    await saveDomain(domain);
+    // await saveDomain(domain);
 
     console.log('finish processing account');
   }
